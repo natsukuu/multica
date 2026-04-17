@@ -63,9 +63,27 @@ import type {
   ListAutopilotsResponse,
   GetAutopilotResponse,
   ListAutopilotRunsResponse,
+  Workflow,
+  CreateWorkflowRequest,
+  UpdateWorkflowRequest,
+  ListWorkflowsResponse,
+  WorkflowRun,
+  WorkflowRunDetail,
+  ListWorkflowRunsResponse,
+  WorkflowStepRun,
+  ApproveStepRunRequest,
+  SubmitPlanRequest,
+  ReviewDecisionRequest,
+  Schedule,
+  CreateScheduleRequest,
+  UpdateScheduleRequest,
+  ListSchedulesResponse,
+  CEOCommandResponse,
+  ListCEOCommandsResponse,
 } from "../types";
 import { type Logger, noopLogger } from "../logger";
 import { createRequestId } from "../utils";
+import { getCurrentSlug } from "../platform/workspace-storage";
 
 export interface ApiClientOptions {
   logger?: Logger;
@@ -92,7 +110,6 @@ export class ApiError extends Error {
 export class ApiClient {
   private baseUrl: string;
   private token: string | null = null;
-  private workspaceId: string | null = null;
   private logger: Logger;
   private options: ApiClientOptions;
 
@@ -110,10 +127,6 @@ export class ApiClient {
     this.token = token;
   }
 
-  setWorkspaceId(id: string | null) {
-    this.workspaceId = id;
-  }
-
   private readCsrfToken(): string | null {
     if (typeof document === "undefined") return null;
     const match = document.cookie
@@ -125,7 +138,8 @@ export class ApiClient {
   private authHeaders(): Record<string, string> {
     const headers: Record<string, string> = {};
     if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
-    if (this.workspaceId) headers["X-Workspace-ID"] = this.workspaceId;
+    const slug = getCurrentSlug();
+    if (slug) headers["X-Workspace-Slug"] = slug;
     const csrf = this.readCsrfToken();
     if (csrf) headers["X-CSRF-Token"] = csrf;
     return headers;
@@ -133,7 +147,10 @@ export class ApiClient {
 
   private handleUnauthorized() {
     this.token = null;
-    this.workspaceId = null;
+    // Workspace id is owned by the URL-driven workspace-storage singleton
+    // (set by [workspaceSlug]/layout.tsx). On 401, the auth flow navigates
+    // to /login which leaves the workspace route, and the next workspace
+    // entry will overwrite the id. No clear needed here.
     this.options.onUnauthorized?.();
   }
 
@@ -231,8 +248,7 @@ export class ApiClient {
     const search = new URLSearchParams();
     if (params?.limit) search.set("limit", String(params.limit));
     if (params?.offset) search.set("offset", String(params.offset));
-    const wsId = params?.workspace_id ?? this.workspaceId;
-    if (wsId) search.set("workspace_id", wsId);
+    if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
     if (params?.status) search.set("status", params.status);
     if (params?.priority) search.set("priority", params.priority);
     if (params?.assignee_id) search.set("assignee_id", params.assignee_id);
@@ -263,9 +279,7 @@ export class ApiClient {
   }
 
   async createIssue(data: CreateIssueRequest): Promise<Issue> {
-    const search = new URLSearchParams();
-    if (this.workspaceId) search.set("workspace_id", this.workspaceId);
-    return this.fetch(`/api/issues?${search}`, {
+    return this.fetch("/api/issues", {
       method: "POST",
       body: JSON.stringify(data),
     });
@@ -396,8 +410,7 @@ export class ApiClient {
   // Agents
   async listAgents(params?: { workspace_id?: string; include_archived?: boolean }): Promise<Agent[]> {
     const search = new URLSearchParams();
-    const wsId = params?.workspace_id ?? this.workspaceId;
-    if (wsId) search.set("workspace_id", wsId);
+    if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
     if (params?.include_archived) search.set("include_archived", "true");
     return this.fetch(`/api/agents?${search}`);
   }
@@ -430,8 +443,7 @@ export class ApiClient {
 
   async listRuntimes(params?: { workspace_id?: string; owner?: "me" }): Promise<AgentRuntime[]> {
     const search = new URLSearchParams();
-    const wsId = params?.workspace_id ?? this.workspaceId;
-    if (wsId) search.set("workspace_id", wsId);
+    if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
     if (params?.owner) search.set("owner", params.owner);
     return this.fetch(`/api/runtimes?${search}`);
   }
@@ -788,9 +800,7 @@ export class ApiClient {
   }
 
   async createProject(data: CreateProjectRequest): Promise<Project> {
-    const search = new URLSearchParams();
-    if (this.workspaceId) search.set("workspace_id", this.workspaceId);
-    return this.fetch(`/api/projects?${search}`, {
+    return this.fetch("/api/projects", {
       method: "POST",
       body: JSON.stringify(data),
     });
@@ -886,5 +896,123 @@ export class ApiClient {
 
   async deleteAutopilotTrigger(autopilotId: string, triggerId: string): Promise<void> {
     await this.fetch(`/api/autopilots/${autopilotId}/triggers/${triggerId}`, { method: "DELETE" });
+  }
+
+  // Workflows
+  async listWorkflows(): Promise<ListWorkflowsResponse> {
+    return this.fetch("/api/workflows");
+  }
+
+  async getWorkflow(id: string): Promise<Workflow> {
+    return this.fetch(`/api/workflows/${id}`);
+  }
+
+  async createWorkflow(data: CreateWorkflowRequest): Promise<Workflow> {
+    return this.fetch("/api/workflows", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateWorkflow(id: string, data: UpdateWorkflowRequest): Promise<Workflow> {
+    return this.fetch(`/api/workflows/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteWorkflow(id: string): Promise<void> {
+    await this.fetch(`/api/workflows/${id}`, { method: "DELETE" });
+  }
+
+  async listWorkflowRuns(workflowId: string, params?: { limit?: number; offset?: number }): Promise<ListWorkflowRunsResponse> {
+    const search = new URLSearchParams();
+    if (params?.limit) search.set("limit", String(params.limit));
+    if (params?.offset) search.set("offset", String(params.offset));
+    return this.fetch(`/api/workflows/${workflowId}/runs?${search}`);
+  }
+
+  async triggerWorkflow(workflowId: string): Promise<WorkflowRun> {
+    return this.fetch(`/api/workflows/${workflowId}/trigger`, { method: "POST" });
+  }
+
+  async getWorkflowRun(runId: string): Promise<WorkflowRunDetail> {
+    return this.fetch(`/api/workflow-runs/${runId}`);
+  }
+
+  async cancelWorkflowRun(runId: string): Promise<void> {
+    await this.fetch(`/api/workflow-runs/${runId}/cancel`, { method: "POST" });
+  }
+
+  async approveStepRun(stepRunId: string, data: ApproveStepRunRequest): Promise<void> {
+    await this.fetch(`/api/workflow-step-runs/${stepRunId}/approve`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async listPendingApprovals(): Promise<WorkflowStepRun[]> {
+    return this.fetch("/api/approvals/pending");
+  }
+
+  async submitWorkflowPlan(runId: string, data: SubmitPlanRequest): Promise<void> {
+    await this.fetch(`/api/workflow-runs/${runId}/plan`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async submitReview(stepRunId: string, data: ReviewDecisionRequest): Promise<void> {
+    await this.fetch(`/api/workflow-step-runs/${stepRunId}/review`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Schedules
+  async listSchedules(): Promise<ListSchedulesResponse> {
+    return this.fetch("/api/schedules");
+  }
+
+  async listSchedulesForWorkflow(workflowId: string): Promise<ListSchedulesResponse> {
+    return this.fetch(`/api/workflows/${workflowId}/schedules`);
+  }
+
+  async getSchedule(id: string): Promise<Schedule> {
+    return this.fetch(`/api/schedules/${id}`);
+  }
+
+  async createSchedule(data: CreateScheduleRequest): Promise<Schedule> {
+    return this.fetch("/api/schedules", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateSchedule(id: string, data: UpdateScheduleRequest): Promise<Schedule> {
+    return this.fetch(`/api/schedules/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteSchedule(id: string): Promise<void> {
+    await this.fetch(`/api/schedules/${id}`, { method: "DELETE" });
+  }
+
+  async toggleSchedule(id: string): Promise<Schedule> {
+    return this.fetch(`/api/schedules/${id}/toggle`, { method: "POST" });
+  }
+
+  // CEO Command
+  async sendCEOCommand(message: string, skipReview?: boolean): Promise<CEOCommandResponse> {
+    return this.fetch("/api/command", {
+      method: "POST",
+      body: JSON.stringify({ message, skip_review: skipReview ?? false }),
+    });
+  }
+
+  async listCEOCommands(): Promise<ListCEOCommandsResponse> {
+    return this.fetch("/api/command/history");
   }
 }

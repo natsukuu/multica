@@ -87,7 +87,7 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   origins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Workspace-ID", "X-Request-ID", "X-Agent-ID", "X-Task-ID", "X-CSRF-Token"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Workspace-ID", "X-Workspace-Slug", "X-Request-ID", "X-Agent-ID", "X-Task-ID", "X-CSRF-Token"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
@@ -101,8 +101,15 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 	// WebSocket
 	mc := &membershipChecker{queries: queries}
 	pr := &patResolver{queries: queries}
+	slugResolver := realtime.SlugResolver(func(ctx context.Context, slug string) (string, error) {
+		ws, err := queries.GetWorkspaceBySlug(ctx, slug)
+		if err != nil {
+			return "", err
+		}
+		return util.UUIDToString(ws.ID), nil
+	})
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
-		realtime.HandleWebSocket(hub, mc, pr, w, r)
+		realtime.HandleWebSocket(hub, mc, pr, slugResolver, w, r)
 	})
 
 	// Local file serving (when using local storage)
@@ -130,7 +137,6 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 
 		r.Post("/runtimes/{runtimeId}/tasks/claim", h.ClaimTaskByRuntime)
 		r.Get("/runtimes/{runtimeId}/tasks/pending", h.ListPendingTasksByRuntime)
-		r.Post("/runtimes/{runtimeId}/usage", h.ReportRuntimeUsage)
 		r.Post("/runtimes/{runtimeId}/ping/{pingId}/result", h.ReportPingResult)
 		r.Post("/runtimes/{runtimeId}/update/{updateId}/result", h.ReportUpdateResult)
 
@@ -341,6 +347,10 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 			// Tasks (user-facing, with ownership check)
 			r.Post("/api/tasks/{taskId}/cancel", h.CancelTaskByUser)
 
+			// CEO command — single entry-point for orchestrated workflows
+			r.Post("/api/command", h.SendCEOCommand)
+			r.Get("/api/command/history", h.ListCEOCommands)
+
 			r.Route("/api/chat/sessions", func(r chi.Router) {
 				r.Post("/", h.CreateChatSession)
 				r.Get("/", h.ListChatSessions)
@@ -354,6 +364,44 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus) chi.Route
 				})
 			})
 			r.Get("/api/chat/pending-tasks", h.ListPendingChatTasks)
+
+			// Workflows
+			r.Route("/api/workflows", func(r chi.Router) {
+				r.Get("/", h.ListWorkflows)
+				r.Post("/", h.CreateWorkflow)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.GetWorkflow)
+					r.Put("/", h.UpdateWorkflow)
+					r.Delete("/", h.DeleteWorkflow)
+					r.Get("/runs", h.ListWorkflowRuns)
+					r.Post("/trigger", h.TriggerWorkflow)
+					r.Get("/schedules", h.ListSchedulesForWorkflow)
+				})
+			})
+
+			// Workflow runs
+			r.Route("/api/workflow-runs/{id}", func(r chi.Router) {
+				r.Get("/", h.GetWorkflowRun)
+				r.Post("/cancel", h.CancelWorkflowRun)
+				r.Post("/plan", h.SubmitWorkflowPlan)
+			})
+
+			// Workflow step approvals & reviews
+			r.Post("/api/workflow-step-runs/{id}/approve", h.ApproveStepRun)
+			r.Post("/api/workflow-step-runs/{id}/review", h.SubmitReview)
+			r.Get("/api/approvals/pending", h.ListPendingApprovals)
+
+			// Schedules
+			r.Route("/api/schedules", func(r chi.Router) {
+				r.Get("/", h.ListSchedules)
+				r.Post("/", h.CreateSchedule)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.GetSchedule)
+					r.Put("/", h.UpdateSchedule)
+					r.Delete("/", h.DeleteSchedule)
+					r.Post("/toggle", h.ToggleSchedule)
+				})
+			})
 
 			// Inbox
 			r.Route("/api/inbox", func(r chi.Router) {
